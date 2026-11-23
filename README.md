@@ -53,9 +53,10 @@ the **Address** list.
 If iOS ever refuses to autoplay, the phone shows **Tap to start**. Tap once and
 it rejoins in sync.
 
-## Downloads (GitHub Actions)
+## Downloads
 
-Every push builds all three platforms. Open **Actions → latest run → Artifacts**:
+Grab the newest build from **Releases → Latest build (main)**. It is rebuilt
+on every push to `main`:
 
 | Platform | File |
 | --- | --- |
@@ -63,11 +64,13 @@ Every push builds all three platforms. Open **Actions → latest run → Artifac
 | Windows | `vrctrl-windows-amd64.zip` → `vrctrl.exe` |
 | Linux | `vrctrl-linux-amd64.tar.gz` → `vrctrl` |
 
-Push a tag like `v1.0.0` to attach the builds to a GitHub Release:
+For a numbered release, push a tag:
 
 ```sh
 git tag v1.0.0 && git push origin v1.0.0
 ```
+
+Builds from other branches and pull requests are under **Actions → run → Artifacts**.
 
 **macOS first launch:** the app isn't signed with an Apple Developer ID, so
 right-click **VRCtrl.app → Open → Open** the first time. You can also run
