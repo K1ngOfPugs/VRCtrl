@@ -1,7 +1,8 @@
-import { bestOffset, expectedPosition, loopError, correction, seekTarget, updateSeekLead, isStale } from './sync.js';
+import { bestOffset, expectedPosition, loopError, correction, seekTarget, updateSeekLead, isStale, holdPosition } from './sync.js';
 
 const video = document.getElementById('v');
 const statusEl = document.getElementById('status');
+const identEl = document.getElementById('ident');
 video.muted = true;          // required for autoplay on iOS
 video.playsInline = true;
 
@@ -19,6 +20,19 @@ let lastPong = 0;            // local ms of last pong (liveness)
 let seekLead = 0.3;          // learned: how far ahead to seek to absorb seek/rebuffer time (s)
 let measureSeek = false;     // next settled tick measures where the last seek landed
 const STALE_MS = 25000;      // no pong for this long = dead socket
+let needTap = false;         // iOS refused to autoplay; waiting for a tap
+let lastDrift = 0;           // last measured error, ms (for the operator)
+
+// Stable per-phone ID so the laptop can name and identify this headset.
+const phoneId = (() => {
+  let id = null;
+  try { id = localStorage.getItem('vrctrl-id'); } catch {}
+  if (!id) {
+    id = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+    try { localStorage.setItem('vrctrl-id', id); } catch {}
+  }
+  return id;
+})();
 
 const serverNow = () => Date.now() + offset;
 
@@ -34,7 +48,7 @@ function connect() {
   clearTimeout(reconnectTimer);
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const sock = new WebSocket(`${proto}://${location.host}/ws`);
+  const sock = new WebSocket(`${proto}://${location.host}/ws?id=${encodeURIComponent(phoneId)}`);
   ws = sock;
   sock.onopen = () => { backoff = 500; lastPong = Date.now(); pingBurst(); };
   sock.onmessage = (ev) => {
@@ -47,6 +61,8 @@ function connect() {
       offset = bestOffset(samples);
     } else if (m.type === 'state') {
       apply(m.state);
+    } else if (m.type === 'identify') {
+      identify(m.label);
     }
   };
   sock.onclose = () => {
@@ -95,7 +111,8 @@ function apply(state) {
     setStatus('Waiting for operator');
     return;
   }
-  const same = prev && !prev.stopped && prev.videoId === state.videoId && prev.startAt === state.startAt;
+  const same = prev && !prev.stopped && prev.videoId === state.videoId && prev.startAt === state.startAt &&
+    prev.playAt === state.playAt && !!prev.paused === !!state.paused && prev.pausePos === state.pausePos;
   if (same && video.getAttribute('src')) return; // reconnect with unchanged state: tick() resyncs
   load(state);
 }
@@ -103,6 +120,8 @@ function apply(state) {
 function load(state) {
   const token = ++loadToken;
   started = false;
+  needTap = false;
+  lastDrift = 0;
   video.pause();
   video.playbackRate = 1;
   if (video.getAttribute('src') !== state.url) {
@@ -113,17 +132,27 @@ function load(state) {
 
   const whenReady = () => {
     if (token !== loadToken) return;
-    if (video.readyState >= 1) schedule(token); else video.addEventListener('loadedmetadata', () => schedule(token), { once: true });
+    const next = () => (state.paused ? hold(token) : schedule(token));
+    if (video.readyState >= 1) next(); else video.addEventListener('loadedmetadata', next, { once: true });
   };
   whenReady();
 }
 
+// Paused: show the paused frame and stay there.
+function hold(token) {
+  if (token !== loadToken || !current || current.stopped || !current.paused) return;
+  if (!video.paused) video.pause();
+  const pos = holdPosition(current, video.duration);
+  if (Math.abs(video.currentTime - pos) > 0.05) { try { video.currentTime = pos; } catch {} }
+}
+
 function schedule(token) {
-  if (token !== loadToken || !current || current.stopped) return;
-  const wait = current.startAt - serverNow();
+  if (token !== loadToken || !current || current.stopped || current.paused) return;
+  const wait = (current.playAt || current.startAt) - serverNow();
   if (wait > 30) {
     if (!video.paused) video.pause();
-    if (video.currentTime !== 0) { try { video.currentTime = 0; } catch {} }
+    const pos = holdPosition(current, video.duration);
+    if (Math.abs(video.currentTime - pos) > 0.05) { try { video.currentTime = pos; } catch {} }
     setTimeout(() => schedule(token), Math.max(0, wait - 25));
     return;
   }
@@ -155,10 +184,11 @@ function play() {
   const token = loadToken;
   const p = video.play();
   if (p && p.catch) {
-    p.then(() => { if (token === loadToken && started) { setStatus(''); requestWakeLock(); } })
+    p.then(() => { if (token === loadToken && started) { needTap = false; setStatus(''); requestWakeLock(); } })
      .catch((err) => {
        // AbortError = superseded by a pause/switch/stop; not a real refusal.
        if ((err && err.name === 'AbortError') || token !== loadToken || !started) return;
+       needTap = true;
        setStatus('Tap to start', true); // e.g. Low Power Mode blocks autoplay
      });
   }
@@ -168,13 +198,14 @@ statusEl.addEventListener('click', () => { if (started) play(); });
 
 // Drift correction.
 setInterval(() => {
-  if (!current || current.stopped || !started) return;
-  if (serverNow() < current.startAt) return;
+  if (!current || current.stopped || current.paused || !started) return;
+  if (serverNow() < (current.playAt || current.startAt)) return;
   if (video.paused) { play(); return; }
   if (video.readyState < 2 || video.seeking) return;
   const d = video.duration;
   const exp = expectedPosition(serverNow(), current.startAt, d);
   const err = loopError(video.currentTime, exp, d);
+  lastDrift = Math.round(err * 1000);
   if (measureSeek) {
     if (video.readyState < 3) return;  // still rebuffering after the seek
     measureSeek = false;
@@ -188,6 +219,57 @@ setInterval(() => {
     video.playbackRate = c.rate;
   }
 }, 500);
+
+// ---- reporting to the operator ---------------------------------------------
+
+function phoneState() {
+  if (!current || current.stopped) return 'idle';
+  if (video.error) return 'error';
+  if (needTap) return 'tap';
+  if (current.paused) return 'paused';
+  if (!started) return video.readyState >= 1 ? 'waiting' : 'loading';
+  if (video.seeking || video.readyState < 3 || video.paused) return 'buffering';
+  return 'playing';
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function reportStatus() {
+  const d = video.duration;
+  send({
+    type: 'status', state: phoneState(), vid: current && !current.stopped ? current.videoId : '',
+    pos: video.currentTime || 0, dur: d > 0 && isFinite(d) ? d : 0, drift: lastDrift,
+  });
+}
+setInterval(reportStatus, 1000);
+
+// A small picture of what the left eye sees, so the laptop can show it.
+const snapCanvas = document.createElement('canvas');
+function sendSnapshot() {
+  if (!current || current.stopped || document.visibilityState !== 'visible') return;
+  if (video.readyState < 2 || !video.videoWidth || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (ws.bufferedAmount > 64 * 1024) return; // slow Wi-Fi: don't pile up
+  const sw = video.videoWidth / 2, sh = video.videoHeight;
+  const w = 320, h = Math.max(1, Math.round(w * sh / sw));
+  snapCanvas.width = w; snapCanvas.height = h;
+  try {
+    snapCanvas.getContext('2d').drawImage(video, 0, 0, sw, sh, 0, 0, w, h);
+    const url = snapCanvas.toDataURL('image/jpeg', 0.6);
+    send({ type: 'snap', vid: current.videoId, pos: video.currentTime || 0, jpeg: url.slice(url.indexOf(',') + 1) });
+  } catch {}
+}
+setInterval(sendSnapshot, 1500);
+
+// Show the headset's name in both eyes for a few seconds.
+let identTimer = null;
+function identify(label) {
+  for (const el of identEl.children) el.textContent = label || 'This headset';
+  identEl.className = '';
+  clearTimeout(identTimer);
+  identTimer = setTimeout(() => { identEl.className = 'hidden'; }, 4000);
+}
 
 // ---- screen / lifecycle ---------------------------------------------------
 
@@ -204,7 +286,7 @@ document.addEventListener('visibilitychange', () => {
   checkAlive();
   connect();
   pingBurst();
-  if (current && !current.stopped && started) play();
+  if (current && !current.stopped && !current.paused && started) play();
   requestWakeLock();
 });
 window.addEventListener('pageshow', connect);

@@ -169,3 +169,79 @@ func TestHubChurn(t *testing.T) {
 	wg.Wait()
 	waitCount(t, h, 0)
 }
+
+func TestHubPauseResumeSeek(t *testing.T) {
+	now := fixedNow
+	h := NewHub(func() time.Time { return now })
+	h.Pause() // stopped: no-op
+	if !h.State().Stopped {
+		t.Fatal("pause while stopped changed state")
+	}
+	h.Play("x", "x.mp4", "/video/x")
+	if p := h.State().Position(now); p != 0 {
+		t.Fatalf("pos before start = %v", p)
+	}
+	now = now.Add(LeadTime + 10*time.Second)
+	h.Pause()
+	s := h.State()
+	if !s.Paused || s.PausePos != 10 || s.Position(now.Add(time.Hour)) != 10 {
+		t.Fatalf("paused = %+v", s)
+	}
+	h.Seek(-4)
+	if s := h.State(); s.PausePos != 6 {
+		t.Fatalf("seek while paused = %+v", s)
+	}
+	now = now.Add(time.Minute)
+	h.TogglePause()
+	s = h.State()
+	if s.Paused || s.PlayAt != now.Add(LeadTime).UnixMilli() {
+		t.Fatalf("resumed = %+v", s)
+	}
+	if p := s.Position(now); p != 6 {
+		t.Fatalf("held pos = %v", p)
+	}
+	if p := s.Position(now.Add(LeadTime + 2*time.Second)); p != 8 {
+		t.Fatalf("playing pos = %v", p)
+	}
+	h.Seek(-100)
+	if p := h.State().Position(now.Add(LeadTime)); p != 0 {
+		t.Fatalf("seek clamp pos = %v", p)
+	}
+}
+
+func TestHubStatusSnapAndIdentify(t *testing.T) {
+	h, srv := newTestHub(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"?id=phone-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	read(t, c)
+	c.Write(ctx, websocket.MessageText, []byte(`{"type":"status","state":"playing","vid":"v1","pos":3.5,"dur":60,"drift":12}`))
+	c.Write(ctx, websocket.MessageText, []byte(`{"type":"snap","vid":"v1","pos":3.4,"jpeg":"/9j/AA=="}`))
+	var hs []Headset
+	for i := 0; i < 200; i++ {
+		hs = h.Headsets()
+		if len(hs) == 1 && hs[0].Snap != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(hs) != 1 {
+		t.Fatalf("headsets = %+v", hs)
+	}
+	got := hs[0]
+	if got.ID != "phone-1" || got.State != "playing" || got.VideoID != "v1" || got.Pos != 3.5 || got.Dur != 60 || got.DriftMS != 12 {
+		t.Fatalf("status = %+v", got)
+	}
+	if len(got.Snap) != 4 || got.SnapVid != "v1" {
+		t.Fatalf("snap = %v %q", got.Snap, got.SnapVid)
+	}
+	h.Identify("phone-1", "Headset 1")
+	_, b, err := c.Read(ctx)
+	if err != nil || !strings.Contains(string(b), `"identify"`) || !strings.Contains(string(b), "Headset 1") {
+		t.Fatalf("identify = %s %v", b, err)
+	}
+}

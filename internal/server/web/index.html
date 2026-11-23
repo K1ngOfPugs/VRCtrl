@@ -21,11 +21,17 @@
     pointer-events: none; }
   #status.hidden { display: none; }
   #status.tap { pointer-events: auto; color: #ddd; font-size: 22px; }
+  #ident { position: fixed; inset: 0; display: flex; pointer-events: none; }
+  #ident.hidden { display: none; }
+  #ident div { flex: 1; display: flex; align-items: center; justify-content: center; text-align: center;
+    color: #fff; background: rgba(0, 90, 200, .55); font: 700 44px -apple-system, system-ui, sans-serif;
+    padding: 12px; }
 </style>
 </head>
 <body>
 <video id="v" muted playsinline loop preload="auto" disablepictureinpicture></video>
 <div id="status">Connecting…</div>
+<div id="ident" class="hidden"><div></div><div></div></div>
 <script type="module" src="app.js"></script>
 </body>
 </html>

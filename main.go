@@ -2,10 +2,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -13,19 +17,19 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/layout"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	qrcode "github.com/skip2/go-qrcode"
 
 	"vrctrl/internal/library"
 	"vrctrl/internal/netaddr"
 	"vrctrl/internal/server"
+	"vrctrl/internal/thumbs"
 )
 
 const (
 	prefFolder = "folder"
 	prefPort   = "port"
+	prefNames  = "headsetNames"
 	defPort    = 8080
 )
 
@@ -34,31 +38,34 @@ type ui struct {
 	win     fyne.Window
 	lib     *library.Library
 	hub     *server.Hub
+	thumbs  *thumbs.Store
 	handler http.Handler
 	srv     *http.Server
 
-	videos    []library.Video
-	currentID string
-	port      int
-	ip        string
+	port int
+	ip   string
 
-	folderLbl *widget.Label
-	list      *widget.List
-	nowLbl    *widget.Label
+	// Connect tab
 	urlLbl    *widget.Label
 	countLbl  *widget.Label
 	qr        *canvas.Image
 	ipSel     *widget.Select
 	portEntry *widget.Entry
+
+	browser       // library.go
+	live          // live.go
+	thumbsChanged atomic.Bool
 }
 
 func main() {
 	a := app.NewWithID("io.vrctrl.app")
 	u := &ui{app: a, lib: library.New(), hub: server.NewHub(time.Now)}
+	u.thumbs = thumbs.New(thumbCacheDir(), func(string) { u.thumbsChanged.Store(true) })
 	u.handler = server.New(u.lib, u.hub)
 	u.win = a.NewWindow("VRCtrl")
+	u.loadNames()
 	u.build()
-	u.win.Resize(fyne.NewSize(920, 580))
+	u.win.Resize(fyne.NewSize(1240, 800))
 
 	u.port = a.Preferences().IntWithFallback(prefPort, defPort)
 	u.portEntry.SetText(strconv.Itoa(u.port))
@@ -72,89 +79,59 @@ func main() {
 			u.srv.Close()
 		}
 	})
+	go func() {
+		for range time.Tick(500 * time.Millisecond) {
+			fyne.Do(u.tick)
+		}
+	}()
 	u.win.ShowAndRun()
 }
 
-func (u *ui) build() {
-	u.folderLbl = widget.NewLabel("No folder selected")
-	u.folderLbl.Truncation = fyne.TextTruncateEllipsis
-	chooseBtn := widget.NewButtonWithIcon("Choose folder…", theme.FolderOpenIcon(), u.chooseFolder)
-
-	u.list = widget.NewList(
-		func() int { return len(u.videos) },
-		func() fyne.CanvasObject {
-			return container.NewHBox(widget.NewIcon(theme.MediaPlayIcon()), widget.NewLabel("video name placeholder"))
-		},
-		func(i widget.ListItemID, o fyne.CanvasObject) {
-			row := o.(*fyne.Container)
-			icon, lbl := row.Objects[0].(*widget.Icon), row.Objects[1].(*widget.Label)
-			v := u.videos[i]
-			switch {
-			case !v.Playable:
-				icon.SetResource(theme.NewDisabledResource(theme.CancelIcon()))
-				lbl.SetText(v.Name + "  — not playable on iPhone")
-				lbl.Importance = widget.LowImportance
-			case v.ID == u.currentID:
-				icon.SetResource(theme.MediaPlayIcon())
-				lbl.SetText(v.Name + "  (now playing)")
-				lbl.Importance = widget.HighImportance
-			default:
-				icon.SetResource(theme.NewDisabledResource(theme.MediaPlayIcon()))
-				lbl.SetText(v.Name)
-				lbl.Importance = widget.MediumImportance
-			}
-			lbl.Refresh()
-		},
-	)
-	u.list.OnSelected = func(i widget.ListItemID) {
-		u.list.UnselectAll() // so clicking the same video again restarts it
-		if i < 0 || i >= len(u.videos) || !u.videos[i].Playable {
-			return
-		}
-		v := u.videos[i]
-		u.currentID = v.ID
-		u.hub.Play(v.ID, v.Name, "/video/"+v.ID)
-		u.nowLbl.SetText("Now playing: " + v.Name)
-		u.list.Refresh()
+func thumbCacheDir() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		base = os.TempDir()
 	}
+	return filepath.Join(base, "VRCtrl", "thumbs")
+}
 
-	rescanBtn := widget.NewButtonWithIcon("Rescan", theme.ViewRefreshIcon(), func() {
-		if d := u.lib.Dir(); d != "" {
-			u.openFolder(d)
+func (u *ui) build() {
+	left := u.buildBrowser()
+	right := u.buildLive(u.buildConnect())
+
+	split := container.NewHSplit(container.NewPadded(left), container.NewPadded(right))
+	split.SetOffset(0.56)
+	u.win.SetContent(split)
+
+	// Keyboard: Space = pause/resume, ←/→ = skip 10 s, Esc = clear search.
+	u.win.Canvas().SetOnTypedKey(func(e *fyne.KeyEvent) {
+		switch e.Name {
+		case fyne.KeySpace:
+			u.togglePause()
+		case fyne.KeyLeft:
+			u.seek(-10)
+		case fyne.KeyRight:
+			u.seek(10)
+		case fyne.KeyEscape:
+			u.search.SetText("")
 		}
 	})
-	stopBtn := widget.NewButtonWithIcon("Stop (black screen)", theme.MediaStopIcon(), func() {
-		u.hub.Stop()
-		u.currentID = ""
-		u.nowLbl.SetText("Stopped")
-		u.list.Refresh()
-	})
-	stopBtn.Importance = widget.DangerImportance
-	u.nowLbl = widget.NewLabel("Stopped")
+}
 
-	left := container.NewBorder(
-		container.NewBorder(nil, nil, chooseBtn, nil, u.folderLbl),
-		container.NewVBox(u.nowLbl, container.NewHBox(rescanBtn, layout.NewSpacer(), stopBtn)),
-		nil, nil,
-		u.list,
-	)
-
-	// Right: connection info.
+// buildConnect makes the QR code / address panel.
+func (u *ui) buildConnect() fyne.CanvasObject {
 	u.qr = canvas.NewImageFromResource(nil)
 	u.qr.FillMode = canvas.ImageFillContain
-	u.qr.SetMinSize(fyne.NewSize(240, 240))
+	u.qr.SetMinSize(fyne.NewSize(220, 220))
 	u.urlLbl = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	u.urlLbl.Selectable = true
 	u.countLbl = widget.NewLabelWithStyle("Headsets connected: 0", fyne.TextAlignCenter, fyne.TextStyle{})
-	u.hub.OnCount(func(n int) {
-		fyne.Do(func() { u.countLbl.SetText(fmt.Sprintf("Headsets connected: %d", n)) })
-	})
 
 	u.ipSel = widget.NewSelect(nil, func(ip string) {
 		u.ip = ip
 		u.refreshURL()
 	})
-	refreshIPBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), u.refreshIPs)
+	refreshIPBtn := widget.NewButtonWithIcon("", themeRefresh(), u.refreshIPs)
 	u.portEntry = widget.NewEntry()
 	applyPort := widget.NewButton("Apply", func() {
 		p, err := strconv.Atoi(u.portEntry.Text)
@@ -166,57 +143,20 @@ func (u *ui) build() {
 	})
 
 	qrBg := canvas.NewRectangle(color.White)
-	right := container.NewVBox(
-		widget.NewLabelWithStyle("Open on each iPhone", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		container.NewStack(qrBg, container.NewPadded(u.qr)),
+	steps := widget.NewLabel("On each iPhone: scan with the Camera app, open in Safari, " +
+		"then Share → Add to Home Screen and open VRCtrl from the home screen.")
+	steps.Wrapping = fyne.TextWrapWord
+	return container.NewVScroll(container.NewVBox(
+		container.NewCenter(container.NewStack(qrBg, container.NewPadded(u.qr))),
 		u.urlLbl,
 		u.countLbl,
+		steps,
 		widget.NewSeparator(),
 		widget.NewForm(
 			widget.NewFormItem("Address", container.NewBorder(nil, nil, nil, refreshIPBtn, u.ipSel)),
 			widget.NewFormItem("Port", container.NewBorder(nil, nil, nil, applyPort, u.portEntry)),
 		),
-	)
-
-	split := container.NewHSplit(container.NewPadded(left), container.NewPadded(right))
-	split.SetOffset(0.6)
-	u.win.SetContent(split)
-}
-
-func (u *ui) chooseFolder() {
-	d := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
-		if err != nil {
-			dialog.ShowError(err, u.win)
-			return
-		}
-		if uri == nil {
-			return
-		}
-		u.openFolder(uri.Path())
-	}, u.win)
-	d.Resize(fyne.NewSize(800, 520))
-	d.Show()
-}
-
-func (u *ui) openFolder(dir string) {
-	vids, err := u.lib.Scan(dir)
-	if err != nil {
-		dialog.ShowError(fmt.Errorf("could not open folder: %w", err), u.win)
-		return
-	}
-	u.app.Preferences().SetString(prefFolder, dir)
-	u.videos = vids
-	// If the playing video is gone (new folder, or file deleted), blank the
-	// headsets rather than leave them pointing at a file that no longer exists.
-	if u.currentID != "" {
-		if _, _, ok := u.lib.Path(u.currentID); !ok {
-			u.hub.Stop()
-			u.currentID = ""
-			u.nowLbl.SetText("Stopped (video no longer in folder)")
-		}
-	}
-	u.folderLbl.SetText(dir)
-	u.list.Refresh()
+	))
 }
 
 func (u *ui) refreshIPs() {
@@ -265,6 +205,37 @@ func (u *ui) refreshURL() {
 	if err != nil {
 		return
 	}
-	u.qr.Resource = fyne.NewStaticResource("qr.png", png)
+	u.qr.Resource = fyne.NewStaticResource("qr-"+url+".png", png)
 	u.qr.Refresh()
+}
+
+// ---- headset names (kept in preferences, keyed by the phone's ID) ----------
+
+func (u *ui) loadNames() {
+	u.names = map[string]string{}
+	json.Unmarshal([]byte(u.app.Preferences().String(prefNames)), &u.names)
+}
+
+func (u *ui) saveNames() {
+	b, _ := json.Marshal(u.names)
+	u.app.Preferences().SetString(prefNames, string(b))
+}
+
+// headsetName returns the saved name, giving a new phone "Headset N".
+func (u *ui) headsetName(id string) string {
+	if n, ok := u.names[id]; ok {
+		return n
+	}
+	used := map[string]bool{}
+	for _, n := range u.names {
+		used[n] = true
+	}
+	for i := 1; ; i++ {
+		n := fmt.Sprintf("Headset %d", i)
+		if !used[n] {
+			u.names[id] = n
+			u.saveNames()
+			return n
+		}
+	}
 }

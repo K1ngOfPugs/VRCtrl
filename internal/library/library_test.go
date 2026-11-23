@@ -102,3 +102,61 @@ func TestIDDiffersAcrossFolders(t *testing.T) {
 		t.Fatal("old folder's ID still resolves")
 	}
 }
+
+func TestScanSubfolders(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"Beach/Day", "Beach/Night", ".secret", "empty"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch(t, dir, "root.mp4")
+	touch(t, dir, filepath.Join("Beach", "waves.mp4"))
+	touch(t, dir, filepath.Join("Beach", "Day", "sun.mov"))
+	touch(t, dir, filepath.Join("Beach", "Night", "moon.mp4"))
+	touch(t, dir, filepath.Join(".secret", "hidden.mp4"))
+	l := New()
+	vids, err := l.Scan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vids) != 4 {
+		t.Fatalf("got %d videos: %+v", len(vids), vids)
+	}
+	var sun Video
+	for _, v := range vids {
+		if v.Name == "sun.mov" {
+			sun = v
+		}
+	}
+	if sun.Folder != "Beach/Day" {
+		t.Fatalf("folder = %q", sun.Folder)
+	}
+	if p, _, ok := l.Path(sun.ID); !ok || p != filepath.Join(dir, "Beach", "Day", "sun.mov") {
+		t.Fatalf("Path = %q %v", p, ok)
+	}
+
+	folders, here := Browse(vids, "")
+	if len(here) != 1 || here[0].Name != "root.mp4" {
+		t.Fatalf("root videos = %+v", here)
+	}
+	if !reflect.DeepEqual(folders, []Folder{{Path: "Beach", Name: "Beach", Count: 3}}) {
+		t.Fatalf("root folders = %+v", folders)
+	}
+	folders, here = Browse(vids, "Beach")
+	if len(here) != 1 || here[0].Name != "waves.mp4" {
+		t.Fatalf("Beach videos = %+v", here)
+	}
+	want := []Folder{{Path: "Beach/Day", Name: "Day", Count: 1}, {Path: "Beach/Night", Name: "Night", Count: 1}}
+	if !reflect.DeepEqual(folders, want) {
+		t.Fatalf("Beach folders = %+v", folders)
+	}
+
+	got := Search(vids, "beach MOON")
+	if len(got) != 1 || got[0].Name != "moon.mp4" {
+		t.Fatalf("search = %+v", got)
+	}
+	if n := len(Search(vids, "")); n != 4 {
+		t.Fatalf("empty search = %d", n)
+	}
+}

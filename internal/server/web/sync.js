@@ -52,3 +52,16 @@ export function updateSeekLead(leadS, errAfterS) {
 export function isStale(nowMs, lastPongMs, timeoutMs) {
   return nowMs - lastPongMs > timeoutMs;
 }
+
+// Wrap an unwrapped position (seconds) into the video's length.
+export function wrap(posS, durationS) {
+  if (!(posS > 0)) return 0;
+  return durationS > 0 && isFinite(durationS) ? posS % durationS : posS;
+}
+
+// Where a phone should hold still before playback (re)starts, or while paused.
+export function holdPosition(state, durationS) {
+  if (state.paused) return wrap(state.pausePos || 0, durationS);
+  const playAt = state.playAt || state.startAt;
+  return expectedPosition(playAt, state.startAt, durationS);
+}

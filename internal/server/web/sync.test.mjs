@@ -58,3 +58,25 @@ test('isStale detects a silent socket', () => {
   assert.equal(isStale(30000, 10000, 25000), false);
   assert.equal(isStale(36000, 10000, 25000), true);
 });
+
+import { wrap, holdPosition } from './sync.js';
+
+test('wrap folds positions into the loop', () => {
+  close(wrap(25, 10), 5);
+  close(wrap(-3, 10), 0);
+  close(wrap(7, NaN), 7);
+});
+
+test('holdPosition: fresh play holds at 0', () => {
+  close(holdPosition({ startAt: 5000, playAt: 5000 }, 10), 0);
+  close(holdPosition({ startAt: 5000 }, 10), 0); // older server without playAt
+});
+
+test('holdPosition: resume holds at the resumed spot', () => {
+  close(holdPosition({ startAt: 1000, playAt: 7000 }, 100), 6);
+  close(holdPosition({ startAt: 1000, playAt: 15000 }, 10), 4);
+});
+
+test('holdPosition: paused holds at pausePos', () => {
+  close(holdPosition({ paused: true, pausePos: 12.5, startAt: 0, playAt: 0 }, 10), 2.5);
+});

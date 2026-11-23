@@ -31,6 +31,21 @@ Videos should already be **side-by-side** (left eye | right eye). Playable forma
 5. Click a video in VRCtrl. About 1.5 s later every headset starts it together.
    Click another to switch. **Stop (black screen)** blanks all headsets.
 
+### The control window
+
+- **Library:** subfolders show as folder tiles (use the breadcrumb or ↑ to go
+  back), and the search box finds videos in every subfolder. Thumbnails and
+  lengths come from **ffmpeg** if it is installed (on PATH, next to the app, or
+  in Homebrew). Without ffmpeg, a video gets its thumbnail the first time it
+  plays on a headset.
+- **Live preview:** the big picture is what the headsets show (left eye),
+  updated about every 1.5 s. Under it are **Pause/Resume**, **±10 s**,
+  **Restart** and **Stop**. Keyboard: Space pauses, ←/→ skip 10 s.
+- **Headsets tab:** one tile per phone with its own picture and status
+  (playing / buffering / *needs a tap* / not responding, plus how far out of
+  sync it is). 👁 shows the headset's name on its screen so you can find it,
+  ✎ renames it, and ⛶ pins it to the big preview.
+
 If port 8080 is busy, change it in the app and click **Apply**, then re-scan
 the QR code. If the laptop has several networks, pick the Wi-Fi address in
 the **Address** list.
