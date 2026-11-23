@@ -1,0 +1,7 @@
+/vrctrl
+/vrctrl.exe
+/vrctrl-*
+/VRCtrl.app
+*.zip
+*.tar.gz
+.superpowers/
