@@ -1,6 +1,7 @@
 package netaddr
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestLANIPv4sNoLoopback(t *testing.T) {
 }
 
 func TestSkipInterface(t *testing.T) {
-	for _, n := range []string{"docker0", "lxcbr0", "veth12ab", "virbr0", "br-3f2a", "vmnet8", "vboxnet0", "utun3"} {
+	for _, n := range []string{"docker0", "lxcbr0", "veth12ab", "virbr0", "br-3f2a", "vmnet8", "vboxnet0", "utun3", "CloudflareWARP", "wg0", "nordlynx", "ppp0"} {
 		if !skipInterface(n) {
 			t.Errorf("%s should be skipped", n)
 		}
@@ -38,5 +39,13 @@ func TestSkipInterface(t *testing.T) {
 		if skipInterface(n) {
 			t.Errorf("%s should not be skipped", n)
 		}
+	}
+}
+
+func TestIsHostOnly(t *testing.T) {
+	_, warp, _ := net.ParseCIDR("172.16.0.2/32")
+	_, lan, _ := net.ParseCIDR("10.50.192.0/19")
+	if !isHostOnly(warp) || isHostOnly(lan) {
+		t.Fatal("isHostOnly wrong")
 	}
 }
