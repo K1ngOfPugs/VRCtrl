@@ -385,6 +385,7 @@ func (u *ui) updateHeadsetTile(t *hsTile, h server.Headset, st server.State) {
 	t.pinBtn.Refresh()
 
 	text, imp := headsetStatus(h, st)
+	text += cacheNote(h, st)
 	t.status.SetText(text)
 	t.status.Importance = imp
 	t.status.Refresh()
@@ -415,6 +416,21 @@ func (u *ui) updateHeadsetTile(t *hsTile, h server.Headset, st server.State) {
 		t.msg.Text = msg
 		t.msg.Refresh()
 	}
+}
+
+// cacheNote says whether a headset is playing from its own saved copy of the
+// video (no Wi-Fi needed) or still saving one.
+func cacheNote(h server.Headset, st server.State) string {
+	if st.Stopped || h.VideoID != st.VideoID || time.Since(h.Seen) > staleAfter {
+		return ""
+	}
+	switch {
+	case h.Cache >= 1:
+		return " · saved on phone"
+	case h.Cache > 0:
+		return " · saving " + strconv.Itoa(int(h.Cache*100)) + "%"
+	}
+	return ""
 }
 
 // headsetStatus describes a headset for the operator, flagging problems.

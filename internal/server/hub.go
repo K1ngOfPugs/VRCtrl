@@ -66,6 +66,7 @@ type Headset struct {
 	Pos     float64   // seconds
 	Dur     float64   // seconds; 0 if unknown
 	DriftMS float64   // actual - expected, ms (playing only)
+	Cache   float64   // 1 = playing from its own saved copy, 0..1 = saving a copy, 0 = streaming
 	Seen    time.Time // last status
 	Snap    []byte    // latest JPEG of the left eye (may be nil)
 	SnapAt  time.Time
@@ -295,6 +296,7 @@ type inMsg struct {
 	Pos   float64 `json:"pos"`
 	Dur   float64 `json:"dur"`
 	Drift float64 `json:"drift"`
+	Cache float64 `json:"cache"`
 	JPEG  string  `json:"jpeg"` // base64
 }
 
@@ -361,6 +363,7 @@ func (h *Hub) ServeWS(w http.ResponseWriter, r *http.Request) {
 			h.mu.Lock()
 			c.info.State, c.info.VideoID = in.State, in.Vid
 			c.info.Pos, c.info.Dur, c.info.DriftMS = in.Pos, in.Dur, in.Drift
+			c.info.Cache = in.Cache
 			c.info.Seen = h.now()
 			h.mu.Unlock()
 		case "snap":

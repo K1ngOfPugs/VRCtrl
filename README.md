@@ -53,6 +53,14 @@ the **Address** list.
 If iOS ever refuses to autoplay, the phone shows **Tap to start**. Tap once and
 it rejoins in sync.
 
+Each phone saves its own copy of a video the first time it plays it. The first
+pass streams from the laptop, then the phone switches to its copy at the loop
+point and stops using the Wi-Fi for that video. This is still true after a
+reload or another session. The headset list shows **saving NN%** and then
+**saved on phone**. If a video file changes on the laptop, phones notice and
+download it again. When a phone runs out of space, it drops the videos it
+used least recently.
+
 ## Downloads
 
 Grab the newest build from **Releases → Latest build (main)**. It is rebuilt

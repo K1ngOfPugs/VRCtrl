@@ -1,4 +1,5 @@
 import { bestOffset, expectedPosition, loopError, correction, seekTarget, updateSeekLead, isStale, holdPosition } from './sync.js';
+import * as vcache from './videocache.js';
 
 const video = document.getElementById('v');
 const statusEl = document.getElementById('status');
@@ -22,6 +23,8 @@ let measureSeek = false;     // next settled tick measures where the last seek l
 const STALE_MS = 25000;      // no pong for this long = dead socket
 let needTap = false;         // iOS refused to autoplay; waiting for a tap
 let lastDrift = 0;           // last measured error, ms (for the operator)
+let localSrc = null;         // {id, url}: object URL of the cached copy of a video
+let swapReady = false;       // a cached copy finished downloading; switch to it at a quiet moment
 
 // Stable per-phone ID so the laptop can name and identify this headset.
 const phoneId = (() => {
@@ -122,20 +125,62 @@ function load(state) {
   started = false;
   needTap = false;
   lastDrift = 0;
+  swapReady = false;
   video.pause();
   video.playbackRate = 1;
-  if (video.getAttribute('src') !== state.url) {
-    video.src = state.url;
-    video.load();
-  }
-  if (!started) setStatus('');  // keep the headset black while buffering
+  setStatus('');  // keep the headset black while buffering
 
-  const whenReady = () => {
+  pickSource(state).then((src) => {
     if (token !== loadToken) return;
+    if (video.getAttribute('src') !== src) {
+      video.src = src;
+      video.load();
+    }
     const next = () => (state.paused ? hold(token) : schedule(token));
     if (video.readyState >= 1) next(); else video.addEventListener('loadedmetadata', next, { once: true });
-  };
-  whenReady();
+  });
+}
+
+// ---- local copy -------------------------------------------------------------
+
+// Play from the phone's own copy when there is one; otherwise stream from the
+// laptop and save a copy in the background for the next time round the loop.
+async function pickSource(state) {
+  if (localSrc && localSrc.id === state.videoId) return localSrc.url;
+  const blob = await vcache.lookup(state.videoId, state.url);
+  if (blob) return useLocal(state.videoId, blob);
+  cacheInBackground(state);
+  return state.url;
+}
+
+function useLocal(id, blob) {
+  if (localSrc && localSrc.id === id) return localSrc.url;
+  if (localSrc) URL.revokeObjectURL(localSrc.url);
+  localSrc = { id, url: URL.createObjectURL(blob) };
+  return localSrc.url;
+}
+
+function cacheInBackground(state) {
+  vcache.download(state.videoId, state.url).then((blob) => {
+    if (!blob || !current || current.stopped || current.videoId !== state.videoId) return;
+    useLocal(state.videoId, blob);
+    swapReady = true;
+    maybeSwap();
+  });
+}
+
+// Switch the playing video over to the local copy without a visible hiccup:
+// while it's still black/paused, or right as the loop wraps (where the
+// streamed copy would have had to rebuffer the start anyway).
+function maybeSwap() {
+  if (!swapReady || !current || current.stopped || !localSrc || localSrc.id !== current.videoId) return;
+  if (video.getAttribute('src') === localSrc.url) { swapReady = false; return; }
+  const d = video.duration;
+  const nearWrap = d > 0 && isFinite(d) && d - expectedPosition(serverNow(), current.startAt, d) < 0.6;
+  if (!started || current.paused || nearWrap) {
+    swapReady = false;
+    load(current);
+  }
 }
 
 // Paused: show the paused frame and stay there.
@@ -198,6 +243,7 @@ statusEl.addEventListener('click', () => { if (started) play(); });
 
 // Drift correction.
 setInterval(() => {
+  maybeSwap();
   if (!current || current.stopped || current.paused || !started) return;
   if (serverNow() < (current.playAt || current.startAt)) return;
   if (video.paused) { play(); return; }
@@ -232,6 +278,13 @@ function phoneState() {
   return 'playing';
 }
 
+// 1 = playing from the phone's own copy, 0..1 = saving a copy, 0 = neither.
+function cacheLevel() {
+  if (!current || current.stopped) return 0;
+  if (localSrc && localSrc.id === current.videoId && video.getAttribute('src') === localSrc.url) return 1;
+  return vcache.progress(current.videoId);
+}
+
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
 }
@@ -240,7 +293,7 @@ function reportStatus() {
   const d = video.duration;
   send({
     type: 'status', state: phoneState(), vid: current && !current.stopped ? current.videoId : '',
-    pos: video.currentTime || 0, dur: d > 0 && isFinite(d) ? d : 0, drift: lastDrift,
+    pos: video.currentTime || 0, dur: d > 0 && isFinite(d) ? d : 0, drift: lastDrift, cache: cacheLevel(),
   });
 }
 setInterval(reportStatus, 1000);
